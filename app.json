@@ -1,0 +1,67 @@
+{
+  "expo": {
+    "name": "FranchiseIQ Field",
+    "slug": "franchiseiq-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "franchiseiq",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0a1628"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.franchiseiq.field",
+      "infoPlist": {
+        "NSCameraUsageDescription": "FranchiseIQ uses the camera to analyze the street while you walk a site survey.",
+        "NSMicrophoneUsageDescription": "FranchiseIQ uses the microphone for live voice with the AI co-pilot.",
+        "NSLocationWhenInUseUsageDescription": "FranchiseIQ attaches GPS to each survey frame for block-level data."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0a1628"
+      },
+      "package": "com.franchiseiq.field",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow FranchiseIQ to use the camera for site surveys.",
+          "microphonePermission": "Allow FranchiseIQ to use the microphone for voice.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow FranchiseIQ to record your location with each survey frame."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}
