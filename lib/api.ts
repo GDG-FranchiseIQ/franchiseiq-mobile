@@ -19,23 +19,13 @@ export async function createProject(
     const id = `proj_${Date.now().toString(36)}`;
     return { project_id: id };
   }
-  try {
-    const res = await fetch(`${base.replace(/\/$/, "")}/api/v1/projects`, {
-      method: "POST",
-      headers: await authHeaders(),
-      body: JSON.stringify({ name, objective }),
-    });
-    if (!res.ok) throw new Error(`createProject failed: ${res.status}`);
-    return res.json() as Promise<CreateProjectResponse>;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("Network request failed") || msg.includes("Failed to fetch")) {
-      throw new Error(
-        "Cannot reach API. For local-only dev, clear EXPO_PUBLIC_API_BASE_URL in .env (or remove the template URL) and restart Expo."
-      );
-    }
-    throw e;
-  }
+  const res = await fetch(`${base.replace(/\/$/, "")}/api/v1/projects`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ name, objective }),
+  });
+  if (!res.ok) throw new Error(`createProject failed: ${res.status}`);
+  return res.json() as Promise<CreateProjectResponse>;
 }
 
 export async function startSession(projectId: string): Promise<StartSessionResponse> {
