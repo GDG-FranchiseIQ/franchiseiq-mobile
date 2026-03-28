@@ -19,12 +19,21 @@ export function getExtra(): Extra {
   return (Constants.expoConfig?.extra ?? Constants.manifest2?.extra ?? {}) as Extra;
 }
 
+/** Returns "" when unset, whitespace-only, or template placeholder — use local mocks instead of fetch. */
+function normalizeApiUrl(raw: string | undefined): string {
+  const s = (raw ?? "").trim();
+  if (!s) return "";
+  const lower = s.toLowerCase();
+  if (lower.includes("your-cloud-run") || lower.includes("example.com/api")) return "";
+  return s;
+}
+
 export function getApiBaseUrl(): string {
-  return getExtra().apiBaseUrl ?? "";
+  return normalizeApiUrl(getExtra().apiBaseUrl);
 }
 
 export function getWsBaseUrl(): string {
-  return getExtra().wsBaseUrl ?? "";
+  return normalizeApiUrl(getExtra().wsBaseUrl);
 }
 
 export function getWebDashboardUrl(): string {

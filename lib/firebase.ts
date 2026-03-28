@@ -1,11 +1,5 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { initializeApp, type FirebaseApp, getApps, getApp } from "firebase/app";
-import {
-  getAuth,
-  initializeAuth,
-  getReactNativePersistence,
-  type Auth,
-} from "firebase/auth";
+import { getAuth, type Auth } from "firebase/auth";
 import { hasFirebaseConfig, getExtra } from "./config";
 
 let auth: Auth | null = null;
@@ -24,17 +18,12 @@ export function getFirebaseApp(): FirebaseApp | null {
   });
 }
 
+/** Uses default auth (memory). To persist sessions on device, wire AsyncStorage + initializeAuth per Firebase RN docs. */
 export function getFirebaseAuth(): Auth | null {
   const a = getFirebaseApp();
   if (!a) return null;
   if (auth) return auth;
-  try {
-    auth = initializeAuth(a, {
-      persistence: getReactNativePersistence(AsyncStorage),
-    });
-  } catch {
-    auth = getAuth(a);
-  }
+  auth = getAuth(a);
   return auth;
 }
 
