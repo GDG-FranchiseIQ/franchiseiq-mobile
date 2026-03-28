@@ -47,6 +47,26 @@ export function useAudioOutPlayback({
     }
   }, [enabled, onSpeakingChange]);
 
+  const stopAndClearQueue = useCallback(async () => {
+    const sound = activeSoundRef.current;
+    if (sound) {
+      await sound.stopAsync().catch(() => {});
+      await sound.unloadAsync().catch(() => {});
+      activeSoundRef.current = null;
+    }
+    const active = activeUriRef.current;
+    if (active) {
+      await FileSystem.deleteAsync(active, { idempotent: true }).catch(() => {});
+      activeUriRef.current = null;
+    }
+    for (const uri of queueRef.current) {
+      await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+    }
+    queueRef.current = [];
+    processingRef.current = false;
+    onSpeakingChange?.(false);
+  }, [onSpeakingChange]);
+
   const enqueueAudio = useCallback(
     async (payload: AudioOutPayload) => {
       if (!enabled) return;
@@ -102,5 +122,5 @@ export function useAudioOutPlayback({
     };
   }, [onSpeakingChange]);
 
-  return { enqueueAudio };
+  return { enqueueAudio, stopAndClearQueue };
 }

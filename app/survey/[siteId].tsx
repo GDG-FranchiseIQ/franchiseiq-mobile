@@ -13,8 +13,8 @@ import * as Location from "expo-location";
 import { AgentToast } from "@/components/AgentToast";
 import { QueryTranscript } from "@/components/QueryTranscript";
 import { ScoreBadge } from "@/components/ScoreBadge";
-import { useAudioPipeline } from "@/hooks/useAudioPipeline";
 import { useAudioOutPlayback } from "@/hooks/useAudioOutPlayback";
+import { useManualQueryRecording } from "@/hooks/useManualQueryRecording";
 import { useFrameCapture } from "@/hooks/useFrameCapture";
 import { useSpeechFallback } from "@/hooks/useSpeechFallback";
 import { SessionWebSocket } from "@/lib/sessionWs";
@@ -40,22 +40,26 @@ export default function SurveyScreen() {
   const [camPerm, requestCam] = useCameraPermissions();
   const [micPerm, requestMic] = useMicrophonePermissions();
   const [locReady, setLocReady] = useState(false);
-  const [audioOn, setAudioOn] = useState(true);
+  /** When false, AI TTS (AUDIO_OUT) is not played. */
+  const [speakerOn, setSpeakerOn] = useState(true);
+  const [queryProcessing, setQueryProcessing] = useState(false);
   const queryDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastLocationRef = useRef<{ lat: number; lng: number } | null>(null);
   const pinFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastAudioOutAtRef = useRef(0);
 
   const cameraRef = useRef<CameraView>(null);
   const wsRef = useRef<SessionWebSocket | null>(null);
   const onSpeakingChange = useCallback((speaking: boolean) => {
     useFieldStore.getState().setVoiceMode(speaking ? "speaking" : "idle");
   }, []);
-  const { enqueueAudio } = useAudioOutPlayback({
-    enabled: audioOn,
+  const { enqueueAudio, stopAndClearQueue } = useAudioOutPlayback({
+    enabled: speakerOn,
     onSpeakingChange,
   });
-  const { speak, stop } = useSpeechFallback({ enabled: audioOn });
+  const { stop } = useSpeechFallback({ enabled: speakerOn });
+  const { isRecording, start: startQueryRecording, stop: stopQueryRecording, cancel: cancelQueryRecording } =
+    useManualQueryRecording(Boolean(micPerm?.granted));
 
   const site = useMemo(() => sites.find((s) => s.id === siteId), [sites, siteId]);
   const sequenceNum = site?.sequenceNum ?? 1;
@@ -102,7 +106,7 @@ export default function SurveyScreen() {
         }
         case "FINDING": {
           st.showAgentToast(`${msg.payload.agent_name}: ${msg.payload.finding_text}`);
-          speak(msg.payload.finding_text, { minGapMs: 2500 });
+          // Spoken output uses server TTS (AUDIO_OUT) only to avoid double voice (expo-speech vs Cloud TTS).
           break;
         }
         case "TRANSCRIPT_TURN": {
@@ -113,15 +117,8 @@ export default function SurveyScreen() {
               st.setQueryOverlay({ user: t.text, ai: prev?.ai });
             } else {
               st.setQueryOverlay({ user: prev?.user, ai: t.text });
-              if (queryDismissRef.current) clearTimeout(queryDismissRef.current);
-              queryDismissRef.current = setTimeout(() => {
-                st.setQueryOverlay(null);
-                queryDismissRef.current = null;
-              }, 5000);
+              setQueryProcessing(false);
             }
-          }
-          if (t.speaker === "ai" && t.mode === "narration") {
-            speak(t.text, { minGapMs: 1400 });
           }
           break;
         }
@@ -144,8 +141,11 @@ export default function SurveyScreen() {
           break;
         }
         case "AUDIO_OUT": {
-          lastAudioOutAtRef.current = Date.now();
-          void enqueueAudio(msg.payload);
+          stop();
+          void (async () => {
+            await stopAndClearQueue();
+            await enqueueAudio(msg.payload);
+          })();
           break;
         }
         case "ERROR": {
@@ -155,6 +155,7 @@ export default function SurveyScreen() {
           ) {
             break;
           }
+          setQueryProcessing(false);
           st.showAgentToast(msg.payload.message, 3000);
           break;
         }
@@ -162,7 +163,7 @@ export default function SurveyScreen() {
           break;
       }
     },
-    [siteId, enqueueAudio, speak]
+    [siteId, enqueueAudio, stop, stopAndClearQueue, setQueryProcessing]
   );
 
   useEffect(() => {
@@ -187,6 +188,7 @@ export default function SurveyScreen() {
       accuracy_m?: number;
       timestamp: string;
     }) => {
+      lastLocationRef.current = { lat: payload.lat, lng: payload.lng };
       wsRef.current?.send({
         type: "FRAME",
         payload: { ...payload, site_id: siteId },
@@ -197,43 +199,73 @@ export default function SurveyScreen() {
 
   useFrameCapture(cameraRef, Boolean(camPerm?.granted && locReady), onFrame);
 
-  const onPcm = useCallback((pcm_base64: string, timestamp: string) => {
-    if (!audioOn) return;
-    wsRef.current?.send({
-      type: "AUDIO_IN",
-      payload: {
-        pcm_base64,
-        timestamp,
-        site_id: siteId,
-        audio_format: "audio/mp4",
-        is_final: true,
-      },
-    });
-  }, [audioOn, siteId]);
-
-  const { metering } = useAudioPipeline({
-    enabled: Boolean(audioOn && micPerm?.granted && camPerm?.granted),
-    onPcmChunk: onPcm,
-  });
-
   useEffect(() => {
     return () => {
       if (queryDismissRef.current) clearTimeout(queryDismissRef.current);
       if (pinFallbackRef.current) clearTimeout(pinFallbackRef.current);
       if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
+      void cancelQueryRecording();
       stop();
     };
-  }, [stop]);
+  }, [stop, cancelQueryRecording]);
 
   useEffect(() => {
-    if (!audioOn) {
+    if (!speakerOn) {
       stop();
       setVoiceMode("idle");
+    }
+  }, [speakerOn, stop, setVoiceMode]);
+
+  useEffect(() => {
+    if (isRecording) {
+      setVoiceMode("listening");
+    }
+  }, [isRecording, setVoiceMode]);
+
+  async function onStartQuestion() {
+    if (!wsConnected) {
+      useFieldStore.getState().showAgentToast("Connect to the server first.", 2500);
       return;
     }
-    if (metering > -35) setVoiceMode("listening");
-    else setVoiceMode("idle");
-  }, [audioOn, metering, setVoiceMode, stop]);
+    if (queryProcessing) return;
+    const ok = await startQueryRecording();
+    if (!ok) {
+      useFieldStore.getState().showAgentToast("Could not start microphone.", 2500);
+    }
+  }
+
+  async function onSendQuestion() {
+    if (!isRecording) {
+      useFieldStore.getState().showAgentToast("Tap “Start” and speak your full question first.", 2800);
+      return;
+    }
+    if (!wsConnected) {
+      await cancelQueryRecording();
+      useFieldStore.getState().showAgentToast("Not connected.", 2000);
+      return;
+    }
+    setVoiceMode("idle");
+    const base64 = await stopQueryRecording();
+    if (!base64?.trim()) {
+      useFieldStore.getState().showAgentToast("No audio captured. Try again.", 2500);
+      return;
+    }
+    const loc = lastLocationRef.current;
+    useFieldStore.getState().setQueryOverlay({ user: "…", ai: undefined });
+    setQueryProcessing(true);
+    useFieldStore.getState().showAgentToast("Question sent. Agent is researching…", 3500);
+    wsRef.current?.send({
+      type: "AUDIO_IN",
+      payload: {
+        pcm_base64: base64,
+        timestamp: new Date().toISOString(),
+        site_id: siteId,
+        audio_format: "audio/mp4",
+        is_final: true,
+        ...(loc ? { lat: loc.lat, lng: loc.lng } : {}),
+      },
+    });
+  }
 
   function onPin() {
     const st = useFieldStore.getState();
@@ -336,15 +368,51 @@ export default function SurveyScreen() {
 
         <AgentToast message={agentToast} />
 
+        <View style={styles.queryPanel}>
+          <Text style={styles.queryLabel}>
+            {queryProcessing
+              ? "Agent is working on your answer…"
+              : isRecording
+                ? "Recording — tap Send when you’re done speaking"
+                : "Ask the agent (manual)"}
+          </Text>
+          <View style={styles.queryButtons}>
+            <Pressable
+              style={[
+                styles.queryBtn,
+                styles.queryBtnStart,
+                (isRecording || queryProcessing || !wsConnected) && styles.queryBtnDisabled,
+              ]}
+              onPress={onStartQuestion}
+              disabled={isRecording || queryProcessing || !wsConnected}
+              hitSlop={6}
+            >
+              <Text style={styles.queryBtnText}>Start</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.queryBtn,
+                styles.queryBtnSend,
+                (!isRecording || queryProcessing || !wsConnected) && styles.queryBtnDisabled,
+              ]}
+              onPress={onSendQuestion}
+              disabled={!isRecording || queryProcessing || !wsConnected}
+              hitSlop={6}
+            >
+              <Text style={styles.queryBtnText}>Send</Text>
+            </Pressable>
+          </View>
+        </View>
+
         <View style={styles.bottomRow}>
           <Pressable
-            style={[styles.mic, audioOn ? styles.micOn : styles.micOff]}
-            onPress={() => setAudioOn((v) => !v)}
+            style={[styles.mic, speakerOn ? styles.micOn : styles.micOff]}
+            onPress={() => setSpeakerOn((v) => !v)}
             hitSlop={10}
           >
-            <Text style={styles.micGlyph}>{audioOn ? "●" : "○"}</Text>
+            <Text style={styles.micGlyph}>{speakerOn ? "●" : "○"}</Text>
             <Text style={styles.micHint}>
-              {!audioOn ? "Muted" : voiceMode === "speaking" ? "AI" : voiceMode === "listening" ? "Mic" : "Live"}
+              {!speakerOn ? "AI off" : voiceMode === "speaking" ? "AI" : voiceMode === "listening" ? "Rec" : "Sound"}
             </Text>
           </Pressable>
           <View style={styles.actions}>
