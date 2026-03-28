@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { startSession } from "@/lib/api";
@@ -31,7 +31,9 @@ export default function SessionHomeScreen() {
         const { session_id } = await startSession(projectId);
         if (!cancelled) setSession(session_id);
       } catch {
-        if (!cancelled) setSession(`sess_${Date.now().toString(36)}`);
+        if (!cancelled) {
+          Alert.alert("Unable to start session", "Check backend connectivity and try again.");
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }

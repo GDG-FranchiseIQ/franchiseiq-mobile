@@ -19,13 +19,27 @@ export interface FramePayload {
   lat: number;
   lng: number;
   accuracy_m?: number;
-  timestamp: number;
+  timestamp: string;
   site_id: string;
 }
 
 export interface AudioInPayload {
   pcm_base64: string;
-  timestamp: number;
+  timestamp: string;
+  site_id?: string;
+  text?: string;
+  lat?: number;
+  lng?: number;
+  audio_format?: string;
+  is_final?: boolean;
+}
+
+export interface AudioOutPayload {
+  pcm_base64: string;
+  timestamp: string;
+  audio_format?: string;
+  sample_rate_hz?: number;
+  is_final?: boolean;
 }
 
 export interface ScoreUpdatePayload {
@@ -42,13 +56,13 @@ export interface FindingPayload {
   agent_name: string;
   finding_text: string;
   source_citations: { label: string; detail?: string }[];
-  timestamp: number;
+  timestamp: string;
 }
 
 export interface TranscriptTurnPayload {
   speaker: "user" | "ai";
   text: string;
-  timestamp: number;
+  timestamp: string;
   mode: "narration" | "query";
 }
 
@@ -77,7 +91,7 @@ export interface ErrorPayload {
 }
 
 export type ServerMessage =
-  | { type: "AUDIO_OUT"; payload: AudioInPayload }
+  | { type: "AUDIO_OUT"; payload: AudioOutPayload }
   | { type: "SCORE_UPDATE"; payload: ScoreUpdatePayload }
   | { type: "FINDING"; payload: FindingPayload }
   | { type: "TRANSCRIPT_TURN"; payload: TranscriptTurnPayload }

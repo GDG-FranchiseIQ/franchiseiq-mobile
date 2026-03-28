@@ -9,7 +9,7 @@ type FramePayload = {
   lat: number;
   lng: number;
   accuracy_m?: number;
-  timestamp: number;
+  timestamp: string;
 };
 
 export function useFrameCapture(
@@ -37,7 +37,7 @@ export function useFrameCapture(
         lat: loc.coords.latitude,
         lng: loc.coords.longitude,
         accuracy_m: loc.coords.accuracy ?? undefined,
-        timestamp: Date.now(),
+        timestamp: new Date().toISOString(),
       });
     } catch {
       /* camera busy or permission */

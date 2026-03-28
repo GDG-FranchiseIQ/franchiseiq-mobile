@@ -41,9 +41,6 @@ export async function startSession(projectId: string): Promise<StartSessionRespo
       body: JSON.stringify({}),
     }
   );
-  if (!res.ok) {
-    // Fallback: some backends only create session on WS connect
-    return { session_id: `sess_${Date.now().toString(36)}` };
-  }
+  if (!res.ok) throw new Error(`startSession failed: ${res.status}`);
   return res.json() as Promise<StartSessionResponse>;
 }

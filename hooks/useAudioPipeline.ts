@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
+import * as FileSystem from "expo-file-system/legacy";
 import { uint8ToBase64 } from "@/lib/base64";
 
 type AudioPipelineOptions = {
   enabled: boolean;
-  onPcmChunk: (pcmBase64: string, timestamp: number) => void;
+  onPcmChunk: (pcmBase64: string, timestamp: string) => void;
 };
 
-/** Records with metering for UI; sends PCM-sized chunks (placeholder bytes) for WebSocket AUDIO_IN until backend defines exact codec. */
+/**
+ * Captures microphone audio continuously and streams incremental encoded chunks.
+ * Expo AV records AAC/M4A; this hook sends encoded byte slices as transport payloads.
+ */
 export function useAudioPipeline({ enabled, onPcmChunk }: AudioPipelineOptions) {
   const [metering, setMetering] = useState(-160);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const chunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rotateInFlightRef = useRef(false);
   const onPcmRef = useRef(onPcmChunk);
   onPcmRef.current = onPcmChunk;
 
@@ -30,6 +35,7 @@ export function useAudioPipeline({ enabled, onPcmChunk }: AudioPipelineOptions) 
     }
     const rec = recordingRef.current;
     recordingRef.current = null;
+    rotateInFlightRef.current = false;
     if (rec) {
       try {
         await rec.stopAndUnloadAsync();
@@ -51,6 +57,50 @@ export function useAudioPipeline({ enabled, onPcmChunk }: AudioPipelineOptions) 
 
     let cancelled = false;
 
+    const startNewRecording = async () => {
+      const rec = new Audio.Recording();
+      try {
+        await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+        await rec.startAsync();
+        recordingRef.current = rec;
+      } catch {
+        recordingRef.current = null;
+      }
+    };
+
+    const rotateRecording = async () => {
+      if (rotateInFlightRef.current) return;
+      const current = recordingRef.current;
+      if (!current) return;
+      rotateInFlightRef.current = true;
+      try {
+        await current.stopAndUnloadAsync();
+        const uri = current.getURI();
+        recordingRef.current = null;
+        if (uri) {
+          try {
+            const base64 = await FileSystem.readAsStringAsync(uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            if (base64.length > 0) {
+              onPcmRef.current(base64, new Date().toISOString());
+            }
+          } catch {
+            // Fallback to tiny non-silent metering payload to keep transport alive.
+            const level = Math.max(0, Math.min(255, Math.round((metering + 160) * 1.6)));
+            const sample = new Uint8Array([level, 0, level, 0, level, 0, level, 0]);
+            onPcmRef.current(uint8ToBase64(sample), new Date().toISOString());
+          }
+          void FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+        }
+        await startNewRecording();
+      } catch {
+        await startNewRecording();
+      } finally {
+        rotateInFlightRef.current = false;
+      }
+    };
+
     (async () => {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
@@ -60,18 +110,13 @@ export function useAudioPipeline({ enabled, onPcmChunk }: AudioPipelineOptions) 
         shouldDuckAndroid: false,
         playThroughEarpieceAndroid: false,
       });
-      const rec = new Audio.Recording();
-      try {
-        await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-        await rec.startAsync();
-      } catch {
-        return;
-      }
+      await startNewRecording();
+      const rec = recordingRef.current;
+      if (!rec) return;
       if (cancelled) {
         await rec.stopAndUnloadAsync().catch(() => {});
         return;
       }
-      recordingRef.current = rec;
 
       chunkTimerRef.current = setInterval(async () => {
         const r = recordingRef.current;
@@ -84,9 +129,8 @@ export function useAudioPipeline({ enabled, onPcmChunk }: AudioPipelineOptions) 
         } catch {
           /* */
         }
-        const silence = new Uint8Array(320);
-        onPcmRef.current(uint8ToBase64(silence), Date.now());
-      }, 400);
+        await rotateRecording();
+      }, 2500);
     })();
 
     return () => {

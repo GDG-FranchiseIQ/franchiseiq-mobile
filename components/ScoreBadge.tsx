@@ -25,7 +25,7 @@ export function ScoreBadge({ score, confidence, uncertain }: Props) {
     ]).start();
   }, [score, pulse]);
 
-  const display = uncertain ? "?" : score != null ? String(Math.round(score)) : "—";
+  const display = uncertain ? "?" : score != null ? String(Math.round(score)) : "0";
 
   return (
     <View style={styles.wrap}>

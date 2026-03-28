@@ -14,7 +14,9 @@ import { AgentToast } from "@/components/AgentToast";
 import { QueryTranscript } from "@/components/QueryTranscript";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { useAudioPipeline } from "@/hooks/useAudioPipeline";
+import { useAudioOutPlayback } from "@/hooks/useAudioOutPlayback";
 import { useFrameCapture } from "@/hooks/useFrameCapture";
+import { useSpeechFallback } from "@/hooks/useSpeechFallback";
 import { SessionWebSocket } from "@/lib/sessionWs";
 import type { ServerMessage } from "@/lib/types";
 import { useFieldStore } from "@/store/useFieldStore";
@@ -24,12 +26,14 @@ export default function SurveyScreen() {
   const siteId = decodeURIComponent(rawId ?? "");
 
   const sessionId = useFieldStore((s) => s.sessionId);
+  const projectId = useFieldStore((s) => s.projectId);
   const sites = useFieldStore((s) => s.sites);
   const compositeScore = useFieldStore((s) => s.compositeScore);
   const confidence = useFieldStore((s) => s.confidence);
   const agentToast = useFieldStore((s) => s.agentToast);
   const queryOverlay = useFieldStore((s) => s.queryOverlay);
   const voiceMode = useFieldStore((s) => s.voiceMode);
+  const wsConnected = useFieldStore((s) => s.wsConnected);
   const setWsConnected = useFieldStore((s) => s.setWsConnected);
   const setVoiceMode = useFieldStore((s) => s.setVoiceMode);
 
@@ -38,9 +42,20 @@ export default function SurveyScreen() {
   const [locReady, setLocReady] = useState(false);
   const [audioOn, setAudioOn] = useState(true);
   const queryDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pinFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAudioOutAtRef = useRef(0);
 
   const cameraRef = useRef<CameraView>(null);
   const wsRef = useRef<SessionWebSocket | null>(null);
+  const onSpeakingChange = useCallback((speaking: boolean) => {
+    useFieldStore.getState().setVoiceMode(speaking ? "speaking" : "idle");
+  }, []);
+  const { enqueueAudio } = useAudioOutPlayback({
+    enabled: audioOn,
+    onSpeakingChange,
+  });
+  const { speak, stop } = useSpeechFallback({ enabled: audioOn });
 
   const site = useMemo(() => sites.find((s) => s.id === siteId), [sites, siteId]);
   const sequenceNum = site?.sequenceNum ?? 1;
@@ -87,6 +102,7 @@ export default function SurveyScreen() {
         }
         case "FINDING": {
           st.showAgentToast(`${msg.payload.agent_name}: ${msg.payload.finding_text}`);
+          speak(msg.payload.finding_text, { minGapMs: 2500 });
           break;
         }
         case "TRANSCRIPT_TURN": {
@@ -104,24 +120,41 @@ export default function SurveyScreen() {
               }, 5000);
             }
           }
+          if (t.speaker === "ai" && t.mode === "narration") {
+            speak(t.text, { minGapMs: 1400 });
+          }
           break;
         }
         case "SITE_PINNED": {
+          if (pinFallbackRef.current) {
+            clearTimeout(pinFallbackRef.current);
+            pinFallbackRef.current = null;
+          }
           st.updateSite(siteId, { addressStub: msg.payload.address });
           st.showAgentToast("Site saved.", 1500);
           break;
         }
         case "SITE_CLOSED": {
+          if (closeFallbackRef.current) {
+            clearTimeout(closeFallbackRef.current);
+            closeFallbackRef.current = null;
+          }
           st.lockSite(siteId, msg.payload.final_composite_score);
           router.back();
           break;
         }
         case "AUDIO_OUT": {
-          st.setVoiceMode("speaking");
-          setTimeout(() => useFieldStore.getState().setVoiceMode("idle"), 400);
+          lastAudioOutAtRef.current = Date.now();
+          void enqueueAudio(msg.payload);
           break;
         }
         case "ERROR": {
+          if (
+            msg.payload.error_code === "WS_MESSAGE_PROCESSING_FAILED" ||
+            msg.payload.error_code === "INVALID_WS_MESSAGE"
+          ) {
+            break;
+          }
           st.showAgentToast(msg.payload.message, 3000);
           break;
         }
@@ -129,12 +162,12 @@ export default function SurveyScreen() {
           break;
       }
     },
-    [siteId]
+    [siteId, enqueueAudio, speak]
   );
 
   useEffect(() => {
-    if (!sessionId || !siteId) return;
-    const ws = new SessionWebSocket(sessionId, siteId, {
+    if (!sessionId || !projectId || !siteId) return;
+    const ws = new SessionWebSocket(sessionId, projectId, siteId, {
       onServerMessage: handleServerMessage,
       onConnectionChange: setWsConnected,
     });
@@ -144,7 +177,7 @@ export default function SurveyScreen() {
       ws.disconnect();
       wsRef.current = null;
     };
-  }, [sessionId, siteId, handleServerMessage, setWsConnected]);
+  }, [sessionId, projectId, siteId, handleServerMessage, setWsConnected]);
 
   const onFrame = useCallback(
     (payload: {
@@ -152,7 +185,7 @@ export default function SurveyScreen() {
       lat: number;
       lng: number;
       accuracy_m?: number;
-      timestamp: number;
+      timestamp: string;
     }) => {
       wsRef.current?.send({
         type: "FRAME",
@@ -164,10 +197,19 @@ export default function SurveyScreen() {
 
   useFrameCapture(cameraRef, Boolean(camPerm?.granted && locReady), onFrame);
 
-  const onPcm = useCallback((pcm_base64: string, timestamp: number) => {
+  const onPcm = useCallback((pcm_base64: string, timestamp: string) => {
     if (!audioOn) return;
-    wsRef.current?.send({ type: "AUDIO_IN", payload: { pcm_base64, timestamp } });
-  }, [audioOn]);
+    wsRef.current?.send({
+      type: "AUDIO_IN",
+      payload: {
+        pcm_base64,
+        timestamp,
+        site_id: siteId,
+        audio_format: "audio/mp4",
+        is_final: true,
+      },
+    });
+  }, [audioOn, siteId]);
 
   const { metering } = useAudioPipeline({
     enabled: Boolean(audioOn && micPerm?.granted && camPerm?.granted),
@@ -175,19 +217,51 @@ export default function SurveyScreen() {
   });
 
   useEffect(() => {
+    return () => {
+      if (queryDismissRef.current) clearTimeout(queryDismissRef.current);
+      if (pinFallbackRef.current) clearTimeout(pinFallbackRef.current);
+      if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
+      stop();
+    };
+  }, [stop]);
+
+  useEffect(() => {
     if (!audioOn) {
+      stop();
       setVoiceMode("idle");
       return;
     }
     if (metering > -35) setVoiceMode("listening");
     else setVoiceMode("idle");
-  }, [audioOn, metering, setVoiceMode]);
+  }, [audioOn, metering, setVoiceMode, stop]);
 
   function onPin() {
+    const st = useFieldStore.getState();
+    const current = st.sites.find((s) => s.id === siteId);
+    const fallbackAddress =
+      current?.addressStub && current.addressStub !== "Location pending…"
+        ? current.addressStub
+        : "Pinned on device";
+    if (!wsConnected) {
+      st.updateSite(siteId, { addressStub: fallbackAddress });
+      st.showAgentToast("Site saved locally. Waiting for sync.", 1800);
+      return;
+    }
     wsRef.current?.send({
       type: "COMMAND",
       payload: { action: "pin_site", site_id: siteId },
     });
+    if (pinFallbackRef.current) clearTimeout(pinFallbackRef.current);
+    pinFallbackRef.current = setTimeout(() => {
+      const latest = useFieldStore.getState();
+      const currentSite = latest.sites.find((s) => s.id === siteId);
+      const alreadyPinned = currentSite?.addressStub && currentSite.addressStub !== "Location pending…";
+      if (!alreadyPinned) {
+        latest.updateSite(siteId, { addressStub: "Pinned on device" });
+        latest.showAgentToast("Saved locally. Server ack delayed.", 2000);
+      }
+      pinFallbackRef.current = null;
+    }, 1800);
   }
 
   function onClose() {
@@ -200,10 +274,25 @@ export default function SurveyScreen() {
           text: "Save & lock",
           style: "destructive",
           onPress: () => {
+            if (!wsConnected) {
+              useFieldStore.getState().lockSite(siteId, compositeScore ?? 0);
+              useFieldStore.getState().showAgentToast("Site locked locally. Waiting for sync.", 1800);
+              return;
+            }
             wsRef.current?.send({
               type: "COMMAND",
               payload: { action: "close_site", site_id: siteId },
             });
+            if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
+            closeFallbackRef.current = setTimeout(() => {
+              const latest = useFieldStore.getState();
+              const currentSite = latest.sites.find((s) => s.id === siteId);
+              if (currentSite?.status !== "locked") {
+                latest.lockSite(siteId, latest.compositeScore ?? 0);
+                latest.showAgentToast("Locked locally. Server ack delayed.", 2000);
+              }
+              closeFallbackRef.current = null;
+            }, 2300);
           },
         },
       ]
@@ -234,8 +323,13 @@ export default function SurveyScreen() {
 
       <SafeAreaView style={styles.overlay} pointerEvents="box-none">
         <View style={styles.topRow}>
-          <View style={styles.pill}>
-            <Text style={styles.pillText}>Site {sequenceNum}</Text>
+          <View style={styles.topLeft}>
+            <View style={styles.pill}>
+              <Text style={styles.pillText}>Site {sequenceNum}</Text>
+            </View>
+            <View style={[styles.connPill, wsConnected ? styles.connOn : styles.connOff]}>
+              <Text style={styles.connText}>{wsConnected ? "Live" : "Connecting"}</Text>
+            </View>
           </View>
           <ScoreBadge score={compositeScore} confidence={confidence} uncertain={uncertain} />
         </View>
@@ -246,6 +340,7 @@ export default function SurveyScreen() {
           <Pressable
             style={[styles.mic, audioOn ? styles.micOn : styles.micOff]}
             onPress={() => setAudioOn((v) => !v)}
+            hitSlop={10}
           >
             <Text style={styles.micGlyph}>{audioOn ? "●" : "○"}</Text>
             <Text style={styles.micHint}>
@@ -253,10 +348,10 @@ export default function SurveyScreen() {
             </Text>
           </Pressable>
           <View style={styles.actions}>
-            <Pressable style={styles.secondary} onPress={onPin}>
+            <Pressable style={styles.secondary} onPress={onPin} hitSlop={8}>
               <Text style={styles.secondaryText}>Pin</Text>
             </Pressable>
-            <Pressable style={styles.danger} onPress={onClose}>
+            <Pressable style={styles.danger} onPress={onClose} hitSlop={8}>
               <Text style={styles.dangerText}>Close</Text>
             </Pressable>
           </View>
@@ -290,6 +385,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 4,
   },
+  topLeft: { gap: 8 },
   pill: {
     backgroundColor: "rgba(15,23,42,0.82)",
     paddingHorizontal: 12,
@@ -299,6 +395,22 @@ const styles = StyleSheet.create({
     borderColor: "rgba(148,163,184,0.35)",
   },
   pillText: { color: "#e2e8f0", fontWeight: "700", fontSize: 13 },
+  connPill: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  connOn: {
+    backgroundColor: "rgba(34,197,94,0.15)",
+    borderColor: "rgba(34,197,94,0.45)",
+  },
+  connOff: {
+    backgroundColor: "rgba(148,163,184,0.16)",
+    borderColor: "rgba(148,163,184,0.4)",
+  },
+  connText: { color: "#e2e8f0", fontWeight: "700", fontSize: 11 },
   bottomRow: {
     flexDirection: "row",
     justifyContent: "space-between",

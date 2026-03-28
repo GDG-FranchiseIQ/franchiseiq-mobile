@@ -11,14 +11,15 @@ export type SessionWsCallbacks = {
 
 const RECONNECT_MS = [200, 400, 800, 1600, 3200];
 
-function buildWebSocketUrl(baseRaw: string, sessionId: string, token: string): string {
+function buildWebSocketUrl(baseRaw: string, sessionId: string, token: string, projectId: string): string {
   const base = baseRaw.replace(/\/$/, "");
+  const pathPrefix = base.endsWith("/api/v1") ? "" : "/api/v1";
   if (base.startsWith("ws://") || base.startsWith("wss://")) {
-    return `${base}/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
+    return `${base}${pathPrefix}/ws/${encodeURIComponent(sessionId)}?project_id=${encodeURIComponent(projectId)}&token=${encodeURIComponent(token)}`;
   }
   const proto = base.startsWith("https") ? "wss" : "ws";
   const hostPath = base.replace(/^https?:\/\//, "");
-  return `${proto}://${hostPath}/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
+  return `${proto}://${hostPath}${pathPrefix}/ws/${encodeURIComponent(sessionId)}?project_id=${encodeURIComponent(projectId)}&token=${encodeURIComponent(token)}`;
 }
 
 export class SessionWebSocket {
@@ -27,9 +28,11 @@ export class SessionWebSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
   private mock: ReturnType<typeof createMockWsHandlers> | null = null;
+  private pendingMessages: ClientMessage[] = [];
 
   constructor(
     private sessionId: string,
+    private projectId: string,
     private siteId: string,
     private callbacks: SessionWsCallbacks
   ) {}
@@ -53,15 +56,26 @@ export class SessionWebSocket {
   }
 
   private async connectReal() {
+    if (this.closedByUser) return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     const base = getWsBaseUrl();
     const token = await getIdTokenForBackend();
-    const wsUrl = buildWebSocketUrl(base, this.sessionId, token);
+    const wsUrl = buildWebSocketUrl(base, this.sessionId, token, this.projectId);
 
     try {
       this.ws = new WebSocket(wsUrl);
       this.ws.onopen = () => {
         this.reconnectAttempt = 0;
+        this.reconnectTimer = null;
         this.callbacks.onConnectionChange(true);
+        this.flushPending();
       };
       this.ws.onmessage = (ev) => {
         try {
@@ -74,8 +88,13 @@ export class SessionWebSocket {
       this.ws.onerror = () => {
         this.callbacks.onConnectionChange(false);
       };
-      this.ws.onclose = () => {
+      this.ws.onclose = (ev) => {
+        this.ws = null;
         this.callbacks.onConnectionChange(false);
+        if (ev.code === 1008) {
+          this.closedByUser = true;
+          return;
+        }
         if (!this.closedByUser) this.scheduleReconnect();
       };
     } catch {
@@ -85,9 +104,13 @@ export class SessionWebSocket {
 
   private scheduleReconnect() {
     if (this.closedByUser) return;
+    if (this.reconnectTimer) return;
     const delay = RECONNECT_MS[Math.min(this.reconnectAttempt, RECONNECT_MS.length - 1)];
     this.reconnectAttempt += 1;
-    this.reconnectTimer = setTimeout(() => this.connectReal(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectReal();
+    }, delay);
   }
 
   send(message: ClientMessage) {
@@ -97,6 +120,20 @@ export class SessionWebSocket {
     }
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+      return;
+    }
+    this.pendingMessages.push(message);
+    if (this.pendingMessages.length > 100) {
+      this.pendingMessages.shift();
+    }
+  }
+
+  private flushPending() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    while (this.pendingMessages.length > 0) {
+      const next = this.pendingMessages.shift();
+      if (!next) break;
+      this.ws.send(JSON.stringify(next));
     }
   }
 
@@ -107,6 +144,7 @@ export class SessionWebSocket {
     this.mock = null;
     this.ws?.close();
     this.ws = null;
+    this.pendingMessages = [];
     this.callbacks.onConnectionChange(false);
   }
 }
